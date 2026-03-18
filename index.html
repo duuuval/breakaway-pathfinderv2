@@ -1,0 +1,803 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
+<title>Breakaway Pathfinder</title>
+
+/*
+ * BREAKAWAY PATHFINDER — v2 Campaign Build
+ * Status: Saved foundation, not production-ready
+ * Last updated: [DATE]
+ *
+ * ── WHAT THIS IS ──────────────────────────────────────────
+ * Campaign mode (10 levels) with gas resource mechanic,
+ * medals, unlock progression, and 5 hand-designed templates.
+ * Intended as the "depth" layer of the full companion app.
+ * Daily puzzle (v1) is being built separately first.
+ *
+ * ── WHAT'S WORKING ────────────────────────────────────────
+ * - Hex grid rendering (clip-path, column-offset layout)
+ * - All 4 tile types: safe, deadlink, rough, gas station, barrier
+ * - Gas resource mechanic (base 1, rough 2, deadlink 3)
+ * - 5 templates with fixed start rows, dead finish tiles,
+ *   deliberate rough placement at chokepoints and near finish,
+ *   fixed gas station positions per corridor
+ * - Medal system: gold 50%+ gas, silver 25%+, bronze finish alive
+ * - Unlock progression: any medal unlocks next level
+ * - Local storage persistence (medals survive refresh)
+ * - Path validation: BFS ensures a safe route always exists,
+ *   carves fallback through mid row if generation fails
+ * - Mobile layout (50px hex at <600px)
+ *
+ * ── KNOWN ISSUES TO FIX BEFORE v2 SHIPS ──────────────────
+ * 1. TEMPLATE PLAYTESTING: Gas budgets are tuned by feel,
+ *    not playtested. Levels 6-10 especially need runs.
+ *    Refill amounts (2-5) likely need adjustment per level.
+ *
+ * 2. PATH FALLBACK IS SILENT: If BFS finds no safe route,
+ *    ensurePath() carves a straight line through mid row
+ *    with no warning. Add a console.warn() at minimum so
+ *    bad seeds are visible during testing.
+ *
+ * 3. DENSITY-DRIVEN TILES STILL RANDOM: '.' zones in templates
+ *    use seeded RNG but produce varied layouts on same level.
+ *    For campaign, consider making all tile positions fixed
+ *    (no '.' zones) so each level is always identical.
+ *    Random variation makes sense for daily/practice, not campaign.
+ *
+ * 4. ROUGH TERRAIN VISIBILITY: '~' hint on unrevealed rough
+ *    tiles is visible before reveal. Intentional for now but
+ *    reconsider — this removes the cost surprise entirely.
+ *    Maybe hint only when adjacent to a revealed tile.
+ *
+ * 5. NO REPLAY VARIABILITY: Same seed = same board always.
+ *    Good for campaign integrity. But means second attempt
+ *    is pure memory, not skill. Consider a "shuffled"
+ *    variant seed on retry for harder levels.
+ *
+ * 6. DEAD FINISH TILES: Visual distinction between a blocked
+ *    finish (BF) and a barrier mid-board is subtle. Players
+ *    may not immediately read that some F tiles are impassable.
+ *    Needs UX testing.
+ *
+ * ── DESIGN DECISIONS STILL OPEN ──────────────────────────
+ * - Numbers on revealed tiles (neighbor deadlink count) still
+ *   feel low-value for a pathfinding game. Revisit before
+ *   v2 ships — consider forward-looking column danger hints
+ *   or dropping numbers entirely in favour of visual texture.
+ *
+ * - Campaign unlock model is "any medal = unlock next."
+ *   Reconsider whether gold on level N should unlock a
+ *   bonus level or shortcut. Adds replay incentive.
+ *
+ * - No attempt enforcement. Same player can retry infinitely
+ *   and memorise the board. Fine for campaign, problem for
+ *   any competitive or leaderboard mode.
+ *
+ * ── NEXT STEPS FOR v2 ─────────────────────────────────────
+ * 1. Playtest levels 1-10, tune gas budgets
+ * 2. Fix issues 1-6 above
+ * 3. Resolve open design decisions
+ * 4. Add solution path reveal on completion (was in v1)
+ * 5. Add share result card
+ * 6. Consider async ghost racing (see architecture notes)
+ *
+ * ── v1 DAILY PUZZLE (separate build) ─────────────────────
+ * Simpler product built first for audience/Kickstarter growth.
+ * Score = reveals only (no gas). Mobile-first. Shareable result.
+ * See: breakaway-daily-v1.html
+ */
+
+  
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;900&family=Barlow:wght@400;500;600&display=swap" rel="stylesheet"/>
+<style>
+:root {
+  --bg: #0f1117;
+  --surface: #171b24;
+  --surface2: #1e2433;
+  --surface3: #252d3d;
+  --border: #2e3a50;
+  --text: #e8edf5;
+  --muted: #6b7a96;
+  --faint: #3a4560;
+  --start: #2196f3;
+  --finish: #e57373;
+  --safe: #d2d9e8;
+  --deadlink: #ff6b35;
+  --rough: #c8a84e;
+  --gas-col: #00c896;
+  --gold: #fbbf24;
+  --silver: #94a3b8;
+  --bronze: #cd7c3a;
+  --font-d: 'Barlow Condensed', sans-serif;
+  --font-b: 'Barlow', sans-serif;
+}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
+html,body{min-height:100%;background:var(--bg);color:var(--text);font-family:var(--font-b);font-size:15px;}
+body{overflow-x:hidden;}
+.screen{display:none;min-height:100vh;}
+.screen.active{display:flex;flex-direction:column;}
+
+/* CAMPAIGN */
+#sc-campaign{padding:28px 20px 40px;max-width:700px;margin:0 auto;width:100%;}
+.game-title{font-family:var(--font-d);font-size:2.8rem;font-weight:900;letter-spacing:0.04em;line-height:1;}
+.game-title span{color:var(--start);}
+.game-sub{margin-top:6px;color:var(--muted);font-size:0.82rem;letter-spacing:0.08em;text-transform:uppercase;}
+.campaign-header{margin-bottom:28px;}
+.howto{margin-top:22px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px 14px;font-size:0.8rem;color:var(--muted);line-height:1.7;}
+.howto strong{color:var(--text);}
+.campaign-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;}
+.lvl-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;cursor:pointer;transition:border-color .15s,transform .12s,background .15s;position:relative;overflow:hidden;}
+.lvl-card:hover:not(.locked){border-color:var(--start);background:var(--surface2);transform:translateY(-2px);}
+.lvl-card.locked{opacity:.38;cursor:not-allowed;}
+.lvl-card.gold-b{border-color:rgba(251,191,36,.35);}
+.lvl-card.silver-b{border-color:rgba(148,163,184,.25);}
+.lvl-card.bronze-b{border-color:rgba(205,124,58,.25);}
+.lvl-num{font-family:var(--font-d);font-size:.72rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin-bottom:2px;}
+.lvl-name{font-family:var(--font-d);font-size:1.2rem;font-weight:700;margin-bottom:8px;}
+.lvl-medal{font-size:1.25rem;min-height:1.4rem;}
+.lvl-meta{display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;}
+.lvl-tag{font-size:.68rem;font-weight:600;letter-spacing:.06em;text-transform:uppercase;padding:2px 7px;border-radius:4px;background:var(--surface3);color:var(--muted);}
+.lvl-tag.easy{color:#4ade80;}.lvl-tag.medium{color:#fbbf24;}.lvl-tag.hard{color:#f87171;}
+.lock-icon{position:absolute;top:12px;right:12px;font-size:1rem;}
+
+/* GAME */
+#sc-game{display:none;flex-direction:column;min-height:100vh;}
+#sc-game.active{display:flex;}
+.topbar{display:flex;align-items:center;gap:10px;padding:10px 14px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0;}
+.ghost-btn{appearance:none;border:1px solid var(--border);background:transparent;color:var(--muted);border-radius:8px;padding:6px 12px;font-family:var(--font-d);font-size:.85rem;font-weight:700;letter-spacing:.05em;cursor:pointer;transition:color .12s,border-color .12s;}
+.ghost-btn:hover{color:var(--text);border-color:var(--text);}
+.topbar-name{font-family:var(--font-d);font-size:1.05rem;font-weight:700;letter-spacing:.06em;flex:1;}
+.gas-wrap{padding:10px 14px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0;}
+.gas-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:5px;}
+.gas-lbl{font-family:var(--font-d);font-size:.72rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);}
+.gas-nums{font-family:var(--font-d);font-weight:700;}
+.gas-cur{font-size:1.2rem;}
+.gas-sep,.gas-max{color:var(--muted);font-size:.9rem;}
+.gas-track{height:7px;background:var(--surface3);border-radius:4px;overflow:hidden;}
+.gas-fill{height:100%;border-radius:4px;background:var(--gas-col);transition:width .3s ease,background .3s ease;}
+.gas-fill.warn{background:var(--gold);}
+.gas-fill.crit{background:var(--deadlink);}
+.medal-row{display:flex;gap:16px;padding:8px 14px;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0;flex-wrap:wrap;}
+.m-pip{display:flex;align-items:center;gap:5px;font-size:.76rem;color:var(--muted);}
+.m-pip .mi{font-size:.85rem;}
+.m-pip .mv{font-family:var(--font-d);font-weight:700;color:var(--text);}
+.board-area{flex:1;overflow:auto;padding:14px 14px 20px;display:flex;flex-direction:column;align-items:center;}
+.board-labels{display:flex;justify-content:space-between;width:100%;max-width:820px;margin-bottom:4px;padding:0 2px;font-family:var(--font-d);font-size:.72rem;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);}
+.board{display:flex;align-items:flex-start;justify-content:center;width:max-content;padding:6px 0 14px;}
+.hcol{display:flex;flex-direction:column;gap:4px;margin-left:-11px;}
+.hcol:first-child{margin-left:0;}
+.hcol.offset{margin-top:28px;}
+
+/* HEX */
+.hex{position:relative;width:60px;height:52px;appearance:none;border:none;background:transparent;cursor:pointer;display:flex;align-items:center;justify-content:center;font-family:var(--font-d);font-size:.95rem;font-weight:700;color:var(--text);transition:transform .08s ease,filter .1s ease;outline:none;user-select:none;}
+.hex::before{content:'';position:absolute;inset:0;clip-path:polygon(25% 0%,75% 0%,100% 50%,75% 100%,25% 100%,0% 50%);background:var(--border);z-index:0;}
+.hex::after{content:'';position:absolute;inset:3px;clip-path:polygon(25% 0%,75% 0%,100% 50%,75% 100%,25% 100%,0% 50%);background:var(--surface2);z-index:1;transition:background .12s;}
+.hex>span{position:relative;z-index:2;pointer-events:none;}
+.hex:hover:not(:disabled):not(.unreach){transform:translateY(-2px);filter:brightness(1.1);}
+.hex.s-start::before{background:var(--start);}
+.hex.s-finish::before{background:var(--finish);}
+.hex.h-hidden::after{background:var(--surface2);}
+.hex.h-hidden{color:rgba(255,255,255,.22);}
+.hex.s-start.h-hidden,.hex.s-finish.h-hidden{color:rgba(255,255,255,.88);font-size:.75rem;}
+.hex.h-dead::before{background:#1a1c24;}
+.hex.h-dead::after{background:#0d0f14;}
+.hex.h-dead{cursor:not-allowed;color:var(--faint);font-size:.8rem;}
+.hex.h-safe::after{background:var(--safe);}
+.hex.h-safe{color:#111827;}
+.hex.h-rough::after{background:var(--rough);}
+.hex.h-rough{color:#1a1200;}
+.hex.h-gas::after{background:var(--gas-col);}
+.hex.h-gas{color:#002e20;}
+.hex.h-deadlink::before{background:rgba(255,255,255,.25);}
+.hex.h-deadlink::after{background:var(--deadlink);}
+.hex.h-deadlink{color:white;}
+.hex.h-finish::after{background:#fca5a5;}
+.hex.h-finish{color:#1a0000;}
+.hex.hint-rough::after{background:#231d0a;}
+.hex.hint-rough{color:#9b7820;font-size:.85rem;}
+.hex.hint-gas::after{background:#071a13;}
+.hex.hint-gas{color:var(--gas-col);font-size:.85rem;}
+.hex.reach::before{box-shadow:0 0 0 2px rgba(33,150,243,.45),0 0 12px rgba(33,150,243,.15);}
+.hex.reach.h-hidden{color:rgba(255,255,255,.6);}
+.hex.unreach{opacity:.42;cursor:not-allowed;}
+.hex.unreach.s-start,.hex.unreach.s-finish{opacity:.68;}
+.hex.n0{color:#4b5a74!important;}
+.hex.n1{color:#3b82f6!important;}
+.hex.n2{color:#22c55e!important;}
+.hex.n3{color:#ef4444!important;}
+.hex.n4{color:#a855f7!important;}
+.hex.n5{color:#f97316!important;}
+.hex.n6{color:#06b6d4!important;}
+@keyframes revealPop{0%{transform:scale(.82);filter:brightness(.85);}65%{transform:scale(1.07);filter:brightness(1.12);}100%{transform:scale(1);filter:brightness(1);}}
+.popped{animation:revealPop .22s ease-out;}
+.board-legend{display:flex;gap:12px;flex-wrap:wrap;margin-top:12px;padding:10px 12px;background:var(--surface);border:1px solid var(--border);border-radius:10px;width:max-content;max-width:100%;}
+.li{display:flex;align-items:center;gap:5px;font-size:.72rem;color:var(--muted);}
+.lhex{width:18px;height:16px;clip-path:polygon(25% 0%,75% 0%,100% 50%,75% 100%,25% 100%,0% 50%);flex-shrink:0;}
+.msgbar{padding:10px 14px;background:var(--surface);border-top:1px solid var(--border);font-size:.88rem;color:var(--muted);min-height:40px;flex-shrink:0;transition:color .2s;}
+.msgbar.alert{color:var(--deadlink);font-weight:600;}
+.msgbar.good{color:var(--gas-col);font-weight:600;}
+.msgbar.warn{color:var(--gold);font-weight:600;}
+
+/* RESULT */
+.r-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:100;align-items:center;justify-content:center;padding:20px;}
+.r-overlay.on{display:flex;}
+.r-card{background:var(--surface);border:1px solid var(--border);border-radius:18px;padding:28px 24px;max-width:360px;width:100%;text-align:center;animation:slideUp .28s ease-out;}
+@keyframes slideUp{from{transform:translateY(20px);opacity:0;}to{transform:translateY(0);opacity:1;}}
+.r-medal{font-size:3.5rem;line-height:1;margin-bottom:6px;}
+.r-title{font-family:var(--font-d);font-size:2rem;font-weight:900;letter-spacing:.05em;margin-bottom:4px;}
+.r-sub{color:var(--muted);font-size:.88rem;margin-bottom:18px;}
+.r-stats{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:20px;}
+.r-stat{background:var(--surface2);border-radius:8px;padding:10px;}
+.r-stat-lbl{font-size:.68rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-bottom:3px;}
+.r-stat-val{font-family:var(--font-d);font-size:1.3rem;font-weight:700;}
+.r-btns{display:flex;flex-direction:column;gap:8px;}
+.btn-p{appearance:none;border:none;background:var(--start);color:white;border-radius:9px;padding:11px 18px;font-family:var(--font-d);font-size:.95rem;font-weight:700;letter-spacing:.06em;cursor:pointer;transition:filter .12s;}
+.btn-p:hover{filter:brightness(1.12);}
+.btn-s{appearance:none;border:1px solid var(--border);background:transparent;color:var(--muted);border-radius:9px;padding:11px 18px;font-family:var(--font-d);font-size:.95rem;font-weight:700;letter-spacing:.06em;cursor:pointer;transition:color .12s,border-color .12s;}
+.btn-s:hover{color:var(--text);border-color:var(--text);}
+.r-card.fail .r-title{color:var(--deadlink);}
+@media(max-width:600px){
+  .hex{width:50px;height:44px;font-size:.85rem;}
+  .hcol{margin-left:-9px;}
+  .hcol.offset{margin-top:24px;}
+  .campaign-grid{grid-template-columns:1fr;}
+}
+</style>
+</head>
+<body>
+
+<div id="sc-campaign" class="screen active">
+  <div class="campaign-header">
+    <div class="game-title">BREAK<span>AWAY</span></div>
+    <div class="game-sub">Pathfinder · Campaign</div>
+  </div>
+  <div id="campaign-grid" class="campaign-grid"></div>
+  <div class="howto">
+    <strong>How to play:</strong> Reveal tiles to move from <strong>S</strong>tart → <strong>F</strong>inish.
+    Every reveal costs <strong>1 gas</strong>. <span style="color:var(--rough)">Rough terrain</span> costs <strong>2 gas</strong>.
+    <span style="color:var(--deadlink)">Deadlinks</span> cost <strong>3 gas</strong>.
+    <span style="color:var(--gas-col)">Gas stations</span> refill your tank.
+    Dark tiles are <strong>barriers</strong> — impassable. Run out of gas = fail.
+    <br/>🥇 50%+ gas remaining &nbsp;·&nbsp; 🥈 25%+ &nbsp;·&nbsp; 🥉 Finish alive
+  </div>
+</div>
+
+<div id="sc-game" class="screen">
+  <div class="topbar">
+    <button class="ghost-btn" id="back-btn">← Map</button>
+    <div class="topbar-name" id="t-name">—</div>
+    <button class="ghost-btn" id="restart-btn">Restart</button>
+  </div>
+  <div class="gas-wrap">
+    <div class="gas-header">
+      <span class="gas-lbl">⛽ Gas Remaining</span>
+      <div class="gas-nums"><span class="gas-cur" id="g-cur">—</span><span class="gas-sep"> / </span><span class="gas-max" id="g-max">—</span></div>
+    </div>
+    <div class="gas-track"><div class="gas-fill" id="g-fill" style="width:100%"></div></div>
+  </div>
+  <div class="medal-row" id="medal-row"></div>
+  <div class="board-area">
+    <div class="board-labels"><span>START</span><span>FINISH</span></div>
+    <div class="board" id="board"></div>
+    <div class="board-legend">
+      <div class="li"><div class="lhex" style="background:var(--safe)"></div>Safe (1⛽)</div>
+      <div class="li"><div class="lhex" style="background:var(--rough)"></div>Rough (2⛽)</div>
+      <div class="li"><div class="lhex" style="background:var(--deadlink)"></div>Deadlink (3⛽)</div>
+      <div class="li"><div class="lhex" style="background:var(--gas-col)"></div>Gas Station</div>
+      <div class="li"><div class="lhex" style="background:#0d0f14;border:1px solid #2e3a50"></div>Barrier</div>
+    </div>
+  </div>
+  <div class="msgbar" id="msgbar">Choose a start tile to begin.</div>
+</div>
+
+<div class="r-overlay" id="r-overlay">
+  <div class="r-card" id="r-card">
+    <div class="r-medal" id="r-medal">🥇</div>
+    <div class="r-title" id="r-title">GOLD</div>
+    <div class="r-sub" id="r-sub">Elite run.</div>
+    <div class="r-stats" id="r-stats"></div>
+    <div class="r-btns">
+      <button class="btn-p" id="r-next">Next Level →</button>
+      <button class="btn-s" id="r-retry">Retry</button>
+      <button class="btn-s" id="r-map">← Map</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const T = { SAFE:'safe', DEAD:'dead', DEADLINK:'deadlink', ROUGH:'rough', GAS:'gas' };
+const BASE_COST=1, ROUGH_COST=2, DEADLINK_COST=3;
+
+// ── TEMPLATES ──────────────────────────────────────────────────────────────
+// Zone key  S=safe  D=deadlink  B=barrier  R=rough(fixed)  G=gas  .=random
+// col 0:  rows in startRows → START tile; others → DEAD (no-entry barrier)
+// col 10: rows in finishRows → FINISH tile; others → DEAD (blocked finish)
+// col 1:  always safe (guaranteed safe entry)
+// Rough (R) is placed deliberately: chokepoints + near-finish pressure only
+// Gas (G) is placed at ~65% across the board, in the corridor that needs it
+// ──────────────────────────────────────────────────────────────────────────
+const TEMPLATES = {
+
+  straight_risk: {
+    // Starts evenly spaced. Dense centre deadlinks push players to edges.
+    // Rough gates cols 7-8 — direct approach costs extra.
+    // Only middle two rows finish — top/bottom are dead ends.
+    startRows:  [0, 2, 4],
+    finishRows: [1, 3],
+    zones: [
+      //0    1    2    3    4    5    6    7    8    9   10
+      ['X', 'S', '.', '.', '.', '.', '.', 'R', '.', '.','BF'],
+      ['S', 'S', '.', '.', 'D', '.', '.', '.', 'R', '.', 'F'],
+      ['X', 'S', 'S', 'D', 'D', 'D', '.', '.', '.', '.','BF'],
+      ['S', 'S', '.', '.', 'D', '.', '.', '.', 'R', '.', 'F'],
+      ['X', 'S', '.', '.', '.', '.', '.', 'R', '.', '.','BF'],
+      ['S', 'S', '.', '.', '.', '.', '.', '.', '.', '.','BF'],
+    ]
+  },
+
+  split_path: {
+    // Starts cluster top+low (rows 0,1,4). Barrier wall splits board.
+    // Top lane: gas station at col 5 rewards taking the riskier upper route.
+    // Rough at col 8 bottom lane compresses final approach.
+    // Finish only rows 0 and 3 — one per corridor.
+    startRows:  [0, 1, 4],
+    finishRows: [0, 3],
+    zones: [
+      ['X', 'S', 'S', '.', '.', 'G', '.', '.', '.', '.', 'F'],
+      ['X', 'S', '.', '.', 'D', '.', 'D', '.', '.', '.','BF'],
+      ['S', 'S', 'B', 'B', 'B', 'B', 'B', 'B', 'B', 'S','BF'],
+      ['S', 'S', '.', '.', '.', '.', '.', '.', 'R', '.', 'F'],
+      ['X', 'S', 'S', '.', '.', '.', 'D', '.', '.', '.','BF'],
+      ['S', 'S', '.', '.', 'D', '.', '.', '.', 'R', '.','BF'],
+    ]
+  },
+
+  zigzag: {
+    // Starts spread rows 0,2,5. Rough diagonal bands across cols 2,5,8
+    // punish straight-line thinking. Gas station lower-mid rewards
+    // patience. Finish rows 2,4 — diagonal path termini.
+    startRows:  [0, 2, 5],
+    finishRows: [2, 4],
+    zones: [
+      ['X', 'S', 'R', '.', '.', 'D', '.', 'R', '.', '.','BF'],
+      ['S', 'S', '.', 'R', '.', '.', '.', '.', 'R', '.','BF'],
+      ['X', 'S', 'D', '.', 'R', '.', 'D', '.', '.', '.', 'F'],
+      ['S', 'S', '.', 'D', '.', 'R', '.', 'D', '.', 'R','BF'],
+      ['X', 'S', 'R', '.', '.', '.', 'R', '.', '.', '.', 'F'],  // was row 4
+      ['S', 'S', '.', 'G', '.', 'R', '.', '.', 'R', '.','BF'],
+    ]
+  },
+
+  cluster: {
+    // Starts rows 0,3,5. Two fixed deadlink clusters create no-go zones.
+    // Gas station between clusters rewards reading numbers carefully.
+    // Rough near finish rows 0,4 compresses final step.
+    // Finish at rows 0 and 4 — wide separation forces early commitment.
+    startRows:  [0, 3, 5],
+    finishRows: [0, 4],
+    zones: [
+      ['X', 'S', 'D', 'D', '.', '.', '.', 'R', '.', '.', 'F'],
+      ['S', 'S', 'D', '.', '.', '.', 'G', '.', '.', '.','BF'],
+      ['S', 'S', '.', '.', '.', '.', '.', '.', '.', '.','BF'],
+      ['X', 'S', '.', '.', '.', 'D', 'D', '.', '.', '.','BF'],
+      ['S', 'S', '.', '.', 'D', 'D', '.', '.', 'R', '.', 'F'],
+      ['X', 'S', '.', '.', '.', '.', '.', 'R', '.', '.','BF'],
+    ]
+  },
+
+  baited: {
+    // Starts rows 1,3,5 — all mid/low, none at top.
+    // Board opens clean, then rough + deadlinks compress into cols 7-9.
+    // Gas station col 5 row 2 — rewards patience mid-board.
+    // Finish only rows 2,4; top row dead, creating a downward funnel.
+    startRows:  [1, 3, 5],
+    finishRows: [2, 4],
+    zones: [
+      ['S', 'S', '.', '.', '.', '.', 'D', 'R', 'D', '.','BF'],
+      ['X', 'S', '.', '.', '.', '.', '.', 'D', 'R', 'D','BF'],
+      ['S', 'S', '.', '.', '.', 'G', '.', '.', 'R', '.', 'F'],
+      ['X', 'S', '.', '.', '.', '.', '.', 'R', 'D', '.','BF'],
+      ['S', 'S', '.', '.', '.', '.', 'D', '.', 'R', '.', 'F'],
+      ['X', 'S', '.', '.', '.', '.', '.', 'D', 'R', 'D','BF'],
+    ]
+  },
+};
+
+// ── LEVELS ────────────────────────────────────────────
+const LEVELS = [
+  { id:1,  name:'First Steps',    tmpl:'straight_risk', seed:1001, density:.10, gas:18, refill:5, diff:'easy'   },
+  { id:2,  name:'Crossroads',     tmpl:'split_path',    seed:1002, density:.11, gas:16, refill:5, diff:'easy'   },
+  { id:3,  name:'The Long Way',   tmpl:'zigzag',        seed:1003, density:.12, gas:20, refill:4, diff:'easy'   },
+  { id:4,  name:'Hot Zone',       tmpl:'cluster',       seed:2001, density:.14, gas:16, refill:4, diff:'medium' },
+  { id:5,  name:'Trap Street',    tmpl:'baited',        seed:2002, density:.15, gas:15, refill:4, diff:'medium' },
+  { id:6,  name:'Double Dare',    tmpl:'split_path',    seed:2003, density:.17, gas:14, refill:3, diff:'medium' },
+  { id:7,  name:'Rough Crossing', tmpl:'zigzag',        seed:3001, density:.19, gas:16, refill:3, diff:'hard'   },
+  { id:8,  name:'Dead Ends',      tmpl:'cluster',       seed:3002, density:.20, gas:14, refill:3, diff:'hard'   },
+  { id:9,  name:'The Snare',      tmpl:'baited',        seed:3003, density:.21, gas:13, refill:3, diff:'hard'   },
+  { id:10, name:'Breakaway',      tmpl:'straight_risk', seed:3004, density:.22, gas:12, refill:2, diff:'hard'   },
+];
+
+// ── RNG ───────────────────────────────────────────────
+function rngFrom(seed) {
+  let t = seed >>> 0;
+  return () => {
+    t += 0x6D2B79F5;
+    let r = Math.imul(t ^ (t >>> 15), 1 | t);
+    r ^= r + Math.imul(r ^ (r >>> 7), 61 | r);
+    return ((r ^ (r >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// ── HEX NEIGHBOURS ────────────────────────────────────
+function nbrs(board, row, col) {
+  const odd = col % 2 === 1;
+  const d = odd
+    ? [[-1,0],[1,0],[0,-1],[1,-1],[0,1],[1,1]]
+    : [[-1,0],[1,0],[-1,-1],[0,-1],[-1,1],[0,1]];
+  return d
+    .map(([dr,dc]) => ({ r:row+dr, c:col+dc }))
+    .filter(({r,c}) => r>=0 && r<board.length && c>=0 && c<board[0].length)
+    .map(({r,c}) => board[r][c]);
+}
+
+// ── BOARD BUILDER ─────────────────────────────────────
+function buildBoard(level) {
+  const tmpl = TEMPLATES[level.tmpl];
+  const rng  = rngFrom(level.seed);
+  const H=6, W=11;
+  const board = [];
+
+  for (let row=0; row<H; row++) {
+    const r = [];
+    for (let col=0; col<W; col++) {
+      const zone = tmpl.zones[row][col];
+      let isStart=false, isFinish=false, type=T.SAFE;
+
+      if (col === 0) {
+        if (tmpl.startRows.includes(row)) { isStart=true; type=T.SAFE; }
+        else { type=T.DEAD; }
+      } else if (col === W-1) {
+        if (zone === 'BF') { type=T.DEAD; }
+        else { isFinish=true; type=T.SAFE; }
+      } else if (col === 1) {
+        type = T.SAFE;
+      } else {
+        switch(zone) {
+          case 'B': type=T.DEAD;     break;
+          case 'D': type=T.DEADLINK; break;
+          case 'R': type=T.ROUGH;    break;
+          case 'G': type=T.GAS;      break;
+          case 'S': type=T.SAFE;     break;
+          default: {
+            const roll = rng();
+            if      (roll < level.density * 0.38) type=T.ROUGH;
+            else if (roll < level.density)         type=T.DEADLINK;
+            else                                   type=T.SAFE;
+          }
+        }
+      }
+      r.push({ row, col, type, isStart, isFinish,
+               revealed:false, wasDeadlink:false, neighborCount:0,
+               gasRefill: type===T.GAS ? level.refill : 0 });
+    }
+    board.push(r);
+  }
+
+  ensurePath(board);
+  calcNeighbors(board);
+  return board;
+}
+
+function ensurePath(board) {
+  const H=board.length, W=board[0].length;
+  const visited=new Set();
+  const q=[];
+  for (let r=0;r<H;r++) {
+    if (board[r][0].isStart) { q.push([r,0]); visited.add(`${r}-0`); }
+  }
+  let ok=false;
+  while (q.length && !ok) {
+    const [row,col]=q.shift();
+    if (col===W-1 && board[row][col].isFinish) { ok=true; break; }
+    for (const n of nbrs(board,row,col)) {
+      const k=`${n.row}-${n.col}`;
+      if (visited.has(k)||n.type===T.DEAD||n.type===T.DEADLINK) continue;
+      visited.add(k); q.push([n.row,n.col]);
+    }
+  }
+  if (!ok) {
+    const mid=Math.floor(H/2);
+    for (let c=1;c<W-1;c++) {
+      const t=board[mid][c];
+      if (t.type===T.DEAD||t.type===T.DEADLINK) t.type=T.SAFE;
+    }
+    if (!board[mid][0].isStart)   { board[mid][0].isStart=true;   board[mid][0].type=T.SAFE; }
+    if (!board[mid][W-1].isFinish){ board[mid][W-1].isFinish=true; board[mid][W-1].type=T.SAFE; }
+  }
+}
+
+function calcNeighbors(board) {
+  for (const row of board) {
+    for (const tile of row) {
+      if (tile.type===T.DEAD||tile.type===T.DEADLINK) { tile.neighborCount=0; continue; }
+      tile.neighborCount = nbrs(board,tile.row,tile.col).filter(n=>n.type===T.DEADLINK).length;
+    }
+  }
+}
+
+// ── RUNTIME ───────────────────────────────────────────
+function newRuntime(level) {
+  return { level, board:buildBoard(level),
+           gas:level.gas, maxGas:level.gas,
+           reveals:0, deadlinksHit:0, roughReveals:0, gasRefilled:0,
+           completed:false, failed:false, revealedOrder:[] };
+}
+
+function reveal(rt, row, col) {
+  if (rt.completed||rt.failed) return {ok:false};
+  const tile=rt.board[row][col];
+  if (tile.revealed||tile.type===T.DEAD) return {ok:false};
+  tile.revealed=true;
+  rt.revealedOrder.push(`${row}-${col}`);
+  rt.reveals++;
+  let cost=BASE_COST, msg=null, msgType='';
+
+  if (tile.type===T.ROUGH) {
+    cost=ROUGH_COST; rt.roughReveals++;
+    msg='Rough terrain — 2 gas burned.'; msgType='warn';
+  } else if (tile.type===T.DEADLINK) {
+    cost=DEADLINK_COST; tile.wasDeadlink=true; rt.deadlinksHit++;
+    msg=`Deadlink! −${cost} gas burned.`; msgType='alert';
+  } else if (tile.type===T.GAS) {
+    rt.gas -= BASE_COST;
+    const add=Math.min(tile.gasRefill, rt.maxGas-rt.gas);
+    rt.gas+=add; rt.gasRefilled+=add;
+    msg=`⛽ Gas station! +${add} gas refilled.`; msgType='good';
+    cost=0;
+  }
+
+  rt.gas -= cost;
+  if (rt.gas<=0) {
+    rt.gas=0; rt.failed=true;
+    msg='💨 Out of gas. Run failed.'; msgType='alert';
+  } else if (tile.isFinish) {
+    rt.completed=true;
+    msg=`⚑ Finish! ${rt.gas} gas remaining.`; msgType='good';
+  }
+  return {ok:true, tile, msg, msgType};
+}
+
+function isReachable(rt, row, col) {
+  const tile=rt.board[row][col];
+  if (tile.revealed||tile.type===T.DEAD) return false;
+  if (rt.revealedOrder.length===0) return tile.isStart;
+  return nbrs(rt.board,row,col).some(n=>n.revealed);
+}
+
+function getMedal(rt) {
+  if (!rt.completed) return null;
+  const pct=rt.gas/rt.maxGas;
+  if (pct>=0.50) return 'gold';
+  if (pct>=0.25) return 'silver';
+  return 'bronze';
+}
+
+// ── STORAGE ───────────────────────────────────────────
+const SK='bpf-v2';
+function loadSave() {
+  try { return JSON.parse(localStorage.getItem(SK))||{medals:{}}; }
+  catch { return {medals:{}}; }
+}
+function saveMedal(id, medal) {
+  try {
+    const d=loadSave(), rank={gold:3,silver:2,bronze:1};
+    if (!d.medals[id]||rank[medal]>rank[d.medals[id]]) {
+      d.medals[id]=medal; localStorage.setItem(SK,JSON.stringify(d));
+    }
+  } catch(e) {}
+}
+function isUnlocked(id, medals) { return id===1||!!medals[id-1]; }
+
+// ── UI ────────────────────────────────────────────────
+let rt=null;
+const $cam=$('#sc-campaign'), $gm=$('#sc-game'), $grid=$('#campaign-grid'),
+      $board=$('#board'), $gCur=$('#g-cur'), $gMax=$('#g-max'),
+      $gFill=$('#g-fill'), $mRow=$('#medal-row'), $msg=$('#msgbar'),
+      $tName=$('#t-name'), $ov=$('#r-overlay'), $rCard=$('#r-card');
+function $(id){return document.getElementById(id.replace('#',''));}
+
+document.getElementById('back-btn').onclick    = showMap;
+document.getElementById('restart-btn').onclick = ()=>rt&&startLevel(rt.level.id);
+document.getElementById('r-next').onclick = ()=>{
+  $ov.classList.remove('on');
+  const next=LEVELS.find(l=>l.id===rt.level.id+1);
+  if(next) startLevel(next.id); else showMap();
+};
+document.getElementById('r-retry').onclick = ()=>{ $ov.classList.remove('on'); startLevel(rt.level.id); };
+document.getElementById('r-map').onclick   = ()=>{ $ov.classList.remove('on'); showMap(); };
+
+function showMap() {
+  $gm.classList.remove('active');
+  $cam.classList.add('active');
+  renderMap();
+}
+
+function renderMap() {
+  const save=loadSave();
+  $grid.innerHTML='';
+  const emo={gold:'🥇',silver:'🥈',bronze:'🥉'};
+  LEVELS.forEach(lvl=>{
+    const ul=isUnlocked(lvl.id,save.medals), medal=save.medals[lvl.id];
+    const card=document.createElement('div');
+    card.className='lvl-card'+(ul?'':' locked')+(medal?` ${medal}-b`:'');
+    card.innerHTML=`
+      ${!ul?'<span class="lock-icon">🔒</span>':''}
+      <div class="lvl-num">Level ${lvl.id}</div>
+      <div class="lvl-name">${lvl.name}</div>
+      <div class="lvl-medal">${medal?emo[medal]:''}</div>
+      <div class="lvl-meta">
+        <span class="lvl-tag ${lvl.diff}">${lvl.diff}</span>
+        <span class="lvl-tag">⛽ ${lvl.gas}</span>
+      </div>`;
+    if(ul) card.onclick=()=>startLevel(lvl.id);
+    $grid.appendChild(card);
+  });
+}
+
+function startLevel(id) {
+  const lvl=LEVELS.find(l=>l.id===id); if(!lvl) return;
+  rt=newRuntime(lvl);
+  $cam.classList.remove('active'); $gm.classList.add('active');
+  $tName.textContent=`${lvl.id}. ${lvl.name}`;
+  renderMedals(); renderGas(); renderBoard();
+  setMsg('Choose a start tile to begin.','');
+}
+
+function renderMedals() {
+  const g=Math.ceil(rt.maxGas*.50), s=Math.ceil(rt.maxGas*.25);
+  $mRow.innerHTML=`
+    <div class="m-pip"><span class="mi">🥇</span><span class="mv">${g}+</span>&nbsp;gas for gold</div>
+    <div class="m-pip"><span class="mi">🥈</span><span class="mv">${s}+</span>&nbsp;gas for silver</div>
+    <div class="m-pip"><span class="mi">🥉</span>Finish alive for bronze</div>`;
+}
+
+function renderGas() {
+  const pct=Math.max(0,rt.gas/rt.maxGas);
+  $gCur.textContent=rt.gas; $gMax.textContent=rt.maxGas;
+  $gFill.style.width=`${pct*100}%`;
+  $gFill.classList.remove('warn','crit');
+  if(pct<=.20) $gFill.classList.add('crit');
+  else if(pct<=.40) $gFill.classList.add('warn');
+}
+
+function renderBoard() {
+  $board.innerHTML='';
+  const W=rt.board[0].length;
+  for (let col=0;col<W;col++) {
+    const ce=document.createElement('div');
+    ce.className='hcol'+(col%2===1?' offset':'');
+    for (let row=0;row<rt.board.length;row++) {
+      const tile=rt.board[row][col];
+      const canR=!rt.completed&&!rt.failed&&isReachable(rt,row,col);
+      const btn=document.createElement('button');
+      btn.type='button';
+      btn.className=tileClass(tile,canR);
+      const sp=document.createElement('span');
+      sp.textContent=tileLabel(tile);
+      btn.appendChild(sp);
+      if(canR) btn.onclick=()=>handleReveal(row,col);
+      else btn.disabled=true;
+      ce.appendChild(btn);
+    }
+    $board.appendChild(ce);
+  }
+}
+
+function tileClass(tile, canR) {
+  const c=['hex'];
+  if(tile.isStart)  c.push('s-start');
+  if(tile.isFinish) c.push('s-finish');
+  if(tile.type===T.DEAD){ c.push('h-dead'); return c.join(' '); }
+  if(!tile.revealed) {
+    c.push('h-hidden');
+    if(tile.type===T.ROUGH) c.push('hint-rough');
+    if(tile.type===T.GAS)   c.push('hint-gas');
+    c.push(canR?'reach':'unreach');
+  } else if(tile.wasDeadlink) {
+    c.push('h-deadlink');
+  } else if(tile.isFinish) {
+    c.push('h-finish');
+  } else if(tile.type===T.ROUGH) {
+    c.push('h-rough'); c.push(`n${tile.neighborCount}`);
+  } else if(tile.type===T.GAS) {
+    c.push('h-gas');
+  } else {
+    c.push('h-safe'); c.push(`n${tile.neighborCount}`);
+  }
+  return c.join(' ');
+}
+
+function tileLabel(tile) {
+  if(tile.type===T.DEAD)    return '▪';
+  if(!tile.revealed) {
+    if(tile.isStart)          return 'S';
+    if(tile.isFinish)         return 'F';
+    if(tile.type===T.ROUGH)   return '~';
+    if(tile.type===T.GAS)     return '⛽';
+    return '•';
+  }
+  if(tile.wasDeadlink)        return '✕';
+  if(tile.isFinish)           return '⚑';
+  if(tile.type===T.GAS)       return '⛽';
+  if(tile.neighborCount===0)  return '';
+  return String(tile.neighborCount);
+}
+
+function setMsg(text,type) {
+  $msg.textContent=text;
+  $msg.className='msgbar'+(type?` ${type}`:'');
+}
+
+function handleReveal(row,col) {
+  const res=reveal(rt,row,col); if(!res.ok) return;
+  if(res.msg) setMsg(res.msg,res.msgType);
+  renderGas(); renderBoard();
+  if(rt.failed)    setTimeout(showResult,700);
+  else if(rt.completed) setTimeout(showResult,500);
+}
+
+function showResult() {
+  const medal=getMedal(rt);
+  const emo={gold:'🥇',silver:'🥈',bronze:'🥉'};
+  const col={gold:'var(--gold)',silver:'var(--silver)',bronze:'var(--bronze)'};
+  const ttl={gold:'GOLD',silver:'SILVER',bronze:'BRONZE'};
+  const sub={gold:'Elite run. Flawless efficiency.',silver:'Solid route. Room to optimise.',bronze:'Survived. Can you do better?'};
+  const next=LEVELS.find(l=>l.id===rt.level.id+1);
+  const $rn=document.getElementById('r-next');
+
+  if(medal) {
+    saveMedal(rt.level.id,medal);
+    $rCard.classList.remove('fail');
+    document.getElementById('r-medal').textContent=emo[medal];
+    document.getElementById('r-title').textContent=ttl[medal];
+    document.getElementById('r-title').style.color=col[medal];
+    document.getElementById('r-sub').textContent=sub[medal];
+    $rn.style.display='';
+    $rn.textContent=next?`Next: ${next.name} →`:'🏁 Campaign Complete!';
+  } else {
+    $rCard.classList.add('fail');
+    document.getElementById('r-medal').textContent='💨';
+    document.getElementById('r-title').textContent='OUT OF GAS';
+    document.getElementById('r-title').style.color='';
+    document.getElementById('r-sub').textContent='The route ran dry. Try again.';
+    $rn.style.display='none';
+  }
+
+  const pctLeft=Math.round(rt.gas/rt.maxGas*100);
+  document.getElementById('r-stats').innerHTML=`
+    <div class="r-stat">
+      <div class="r-stat-lbl">Gas Remaining</div>
+      <div class="r-stat-val" style="color:var(--gas-col)">${rt.gas}<span style="font-size:.75rem;color:var(--muted)"> (${pctLeft}%)</span></div>
+    </div>
+    <div class="r-stat">
+      <div class="r-stat-lbl">Reveals</div>
+      <div class="r-stat-val">${rt.reveals}</div>
+    </div>
+    <div class="r-stat">
+      <div class="r-stat-lbl">Deadlinks Hit</div>
+      <div class="r-stat-val" style="color:var(--deadlink)">${rt.deadlinksHit}</div>
+    </div>
+    <div class="r-stat">
+      <div class="r-stat-lbl">Rough Tiles</div>
+      <div class="r-stat-val" style="color:var(--rough)">${rt.roughReveals}</div>
+    </div>`;
+
+  $ov.classList.add('on');
+}
+
+showMap();
+</script>
+</body>
+</html>
